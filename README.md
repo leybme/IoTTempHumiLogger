@@ -231,24 +231,3 @@ Replace `COM3` with your actual port. The four binary files come from the Platfo
 
 > **Tip:** If the device is not detected, hold the **BOOT button** while plugging in USB, then release after esptool starts connecting.
 
-### About `boot_app0.bin`
-
-`boot_app0.bin` is a small fixed binary provided by the ESP-IDF/Arduino framework. It marks the OTA partition slot as valid so the ESP32 knows which app to boot. It **never changes** between builds, so it can be copied once and reused.
-
-Copy it from the PlatformIO packages into your `release/` folder:
-
-```powershell
-Copy-Item "$env:USERPROFILE\.platformio\packages\framework-arduinoespressif32\tools\partitions\boot_app0.bin" `
-  "release\boot_app0.bin"
-```
-
-After copying, your `release/` folder should contain all four files:
-
-```
-release/
-  bootloader.bin     ← from .pio/build/esp32-s3-devkitm-1/
-  partitions.bin     ← from .pio/build/esp32-s3-devkitm-1/
-  boot_app0.bin      ← from PlatformIO packages (fixed, reusable)
-  firmware.bin       ← from .pio/build/esp32-s3-devkitm-1/
-```
-
