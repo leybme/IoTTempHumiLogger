@@ -839,7 +839,7 @@
                 "ARDUINO=10812",
                 "ARDUINO_VARIANT=\"esp32s3\"",
                 "ARDUINO_BOARD=\"Espressif ESP32-S3-DevKitM-1\"",
-                "ARDUINO_PARTITION_min_spiffs",
+                "ARDUINO_PARTITION_partitions_max_spiffs",
                 ""
             ],
             "cStandard": "gnu17",

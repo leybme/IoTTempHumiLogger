@@ -19,6 +19,7 @@
 #include <time.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
+#include <esp_mac.h>
 
 // ---- Pin definitions ----
 #define SDA_PIN       9
@@ -48,7 +49,8 @@ bool bootBtnHeld   = false;
 // Latest reading (updated every loop iteration if sensor OK)
 float latestTemp     = 0;
 float latestHumidity = 0;
-String latestTimeStr = "";
+String latestUtcStr  = "";   // always UTC, used for CSV logging
+String latestTimeStr = "";   // display timezone (UTC or GMT+7), used for UI
 
 // ---- Helpers ----
 
@@ -80,17 +82,18 @@ String csvPath(const String& dateStr) {
     return "/log_" + dateStr + ".csv";
 }
 
-// Append one record to today's CSV
-void appendRecord(float temp, float humi, const String& dt) {
-    String path = csvPath(formatDate(nowLocal()));
+// Append one record to today's CSV (always UTC date and UTC timestamp)
+void appendRecord(float temp, float humi, const String& utcDt) {
+    time_t utc = time(nullptr);
+    String path = csvPath(formatDate(utc));  // filename based on UTC date
     File f = SPIFFS.open(path, FILE_APPEND);
     if (!f) {
         // Try creating with header
         f = SPIFFS.open(path, FILE_WRITE);
-        if (f) f.println("datetime,temperature_c,humidity_pct");
+        if (f) f.println("datetime_utc,temperature_c,humidity_pct");
     }
     if (f) {
-        f.printf("%s,%.2f,%.2f\n", dt.c_str(), temp, humi);
+        f.printf("%s,%.2f,%.2f\n", utcDt.c_str(), temp, humi);
         f.close();
     }
 }
@@ -102,7 +105,13 @@ bool readSensor() {
     sht4.getEvent(&hEvent, &tEvent);
     latestTemp     = tEvent.temperature;
     latestHumidity = hEvent.relative_humidity;
-    latestTimeStr  = ntpSynced ? formatDateTime(nowLocal()) : "NTP not synced";
+    if (ntpSynced) {
+        latestUtcStr  = formatDateTime(time(nullptr));  // always UTC for logging
+        latestTimeStr = formatDateTime(nowLocal());      // display tz for UI
+    } else {
+        latestUtcStr  = "NTP not synced";
+        latestTimeStr = "NTP not synced";
+    }
     return true;
 }
 
@@ -308,10 +317,11 @@ void setupWebServer() {
     server.on("/getOnce", HTTP_GET, [](AsyncWebServerRequest* req) {
         readSensor();
         JsonDocument doc;
-        doc["temperature"] = latestTemp;
-        doc["humidity"]    = latestHumidity;
-        doc["datetime"]    = latestTimeStr;
-        doc["timezone"]    = useGMT7 ? "GMT+7" : "UTC";
+        doc["temperature"]    = latestTemp;
+        doc["humidity"]       = latestHumidity;
+        doc["datetime"]       = latestTimeStr;   // display timezone
+        doc["datetime_utc"]   = latestUtcStr;    // always UTC
+        doc["timezone"]       = useGMT7 ? "GMT+7" : "UTC";
         String out;
         serializeJson(doc, out);
         req->send(200, "application/json", out);
@@ -324,7 +334,7 @@ void setupWebServer() {
             dateStr = req->getParam("")->value();
         }
         if (dateStr == "today" || dateStr.isEmpty()) {
-            dateStr = formatDate(nowLocal());
+            dateStr = formatDate(time(nullptr));  // always UTC date matches log filenames
         }
         String path = csvPath(dateStr);
         if (SPIFFS.exists(path)) {
@@ -424,10 +434,16 @@ void setup() {
         Serial.println("SHT45 not found!");
     }
 
+    // Build AP name from last 3 bytes of MAC: Log_AABBCC
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char apName[16];
+    snprintf(apName, sizeof(apName), "Log_%02X%02X%02X", mac[3], mac[4], mac[5]);
+
     // WiFiManager captive portal
     WiFiManager wm;
     wm.setConfigPortalTimeout(180); // 3 min timeout
-    bool connected = wm.autoConnect("IoTLogger-Setup");
+    bool connected = wm.autoConnect(apName);
     if (!connected) {
         Serial.println("WiFi connect failed, restarting...");
         delay(3000);
@@ -472,9 +488,9 @@ void loop() {
     if (now - lastLogMs >= LOG_INTERVAL_MS) {
         lastLogMs = now;
         if (readSensor() && ntpSynced) {
-            appendRecord(latestTemp, latestHumidity, latestTimeStr);
+            appendRecord(latestTemp, latestHumidity, latestUtcStr);
             Serial.printf("[LOG] %s  T=%.2f  H=%.2f\n",
-                          latestTimeStr.c_str(), latestTemp, latestHumidity);
+                          latestUtcStr.c_str(), latestTemp, latestHumidity);
         }
     }
 
