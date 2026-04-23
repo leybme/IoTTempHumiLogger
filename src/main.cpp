@@ -145,54 +145,73 @@ static const char INDEX_HTML[] PROGMEM = R"rawhtml(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>IoT Temp/Humi Logger</title>
+<title>IoT Logger</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
-  body{font-family:Arial,sans-serif;background:#1a1a2e;color:#eee;margin:0;padding:16px;}
-  h1{text-align:center;color:#e94560;}
-  .card{background:#16213e;border-radius:12px;padding:16px;margin-bottom:16px;}
-  .row{display:flex;gap:16px;flex-wrap:wrap;}
-  .metric{flex:1;min-width:120px;text-align:center;}
-  .metric .val{font-size:2.5em;font-weight:bold;color:#0f3460;}
-  .metric .lbl{font-size:.85em;color:#aaa;}
-  select,button{padding:8px 14px;border-radius:8px;border:none;cursor:pointer;font-size:1em;}
-  button{background:#e94560;color:#fff;margin:4px;}
-  button.dl{background:#0f3460;}
-  button.rm{background:#7a0000;}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f7;color:#1d1d1f;padding:20px;}
+  h1{font-size:1.2rem;font-weight:600;color:#1d1d1f;margin-bottom:20px;letter-spacing:-.3px;}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px;}
+  .tile{background:#fff;border-radius:14px;padding:20px 16px;box-shadow:0 1px 4px rgba(0,0,0,.08);}
+  .tile .val{font-size:2.2rem;font-weight:700;line-height:1;color:#1d1d1f;}
+  .tile .lbl{font-size:.75rem;color:#6e6e73;margin-top:6px;text-transform:uppercase;letter-spacing:.5px;}
+  .tile.time .val{font-size:1rem;font-weight:500;margin-top:4px;}
+  .card{background:#fff;border-radius:14px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:16px;}
+  .card h2{font-size:.85rem;font-weight:600;color:#6e6e73;text-transform:uppercase;letter-spacing:.5px;margin-bottom:16px;}
+  .tz-group{display:flex;gap:0;border-radius:8px;overflow:hidden;border:1px solid #d2d2d7;width:fit-content;margin-bottom:16px;}
+  .tz-btn{padding:6px 18px;font-size:.85rem;font-weight:500;background:#fff;color:#1d1d1f;border:none;cursor:pointer;transition:background .15s,color .15s;}
+  .tz-btn.active{background:#1d1d1f;color:#fff;}
+  canvas{max-height:260px;}
   table{width:100%;border-collapse:collapse;}
-  th,td{padding:8px;border-bottom:1px solid #333;text-align:left;font-size:.9em;}
-  th{color:#e94560;}
-  canvas{max-height:300px;}
-  .tz-btn{background:#0f3460;}
-  .tz-btn.active{background:#e94560;}
-  .cap{font-size:.9em;color:#aaa;margin-top:8px;}
+  th{font-size:.75rem;font-weight:600;color:#6e6e73;text-transform:uppercase;letter-spacing:.5px;padding:0 0 10px;text-align:left;border-bottom:1px solid #e5e5ea;}
+  td{padding:10px 0;font-size:.875rem;border-bottom:1px solid #f2f2f7;vertical-align:middle;}
+  td:last-child{text-align:right;}
+  .btn{display:inline-flex;align-items:center;gap:4px;padding:5px 12px;border-radius:7px;border:1px solid #d2d2d7;background:#fff;font-size:.8rem;font-weight:500;cursor:pointer;color:#1d1d1f;transition:background .15s;}
+  .btn:hover{background:#f5f5f7;}
+  .btn.danger{border-color:#ffd0d0;color:#c00;background:#fff8f8;}
+  .btn.danger:hover{background:#ffd0d0;}
+  .cap-bar-wrap{background:#f2f2f7;border-radius:6px;height:6px;margin:10px 0 6px;overflow:hidden;}
+  .cap-bar{height:6px;border-radius:6px;background:#1d1d1f;transition:width .4s;}
+  .cap-text{font-size:.78rem;color:#6e6e73;display:flex;justify-content:space-between;}
+  .badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:.72rem;font-weight:600;background:#f2f2f7;color:#1d1d1f;margin-left:6px;}
 </style>
 </head>
 <body>
 <h1>IoT Temp &amp; Humidity Logger</h1>
 
-<div class="card">
-  <div class="row">
-    <div class="metric"><div class="val" id="val-temp">--</div><div class="lbl">Temp (&deg;C)</div></div>
-    <div class="metric"><div class="val" id="val-humi">--</div><div class="lbl">Humidity (%)</div></div>
-    <div class="metric"><div class="val" id="val-time" style="font-size:1em;margin-top:12px;">--</div><div class="lbl">Time</div></div>
+<div class="grid">
+  <div class="tile">
+    <div class="val" id="val-temp">--</div>
+    <div class="lbl">Temperature &deg;C</div>
   </div>
-  <div style="margin-top:12px;text-align:center;">
-    <button class="tz-btn" id="btn-utc" onclick="setTZ('UTC')">UTC</button>
-    <button class="tz-btn active" id="btn-gmt7" onclick="setTZ('GMT7')">GMT+7</button>
+  <div class="tile">
+    <div class="val" id="val-humi">--</div>
+    <div class="lbl">Humidity %</div>
+  </div>
+  <div class="tile time">
+    <div class="lbl">Time</div>
+    <div class="val" id="val-time">--</div>
   </div>
 </div>
 
 <div class="card">
+  <div class="tz-group">
+    <button class="tz-btn" id="btn-utc" onclick="setTZ('UTC')">UTC</button>
+    <button class="tz-btn active" id="btn-gmt7" onclick="setTZ('GMT7')">GMT+7</button>
+  </div>
   <canvas id="chart"></canvas>
 </div>
 
 <div class="card">
-  <h3 style="margin-top:0;">Log Files</h3>
-  <div class="cap" id="capacity">Loading...</div>
-  <br>
-  <table id="file-table">
-    <thead><tr><th>Date</th><th>Size</th><th>Actions</th></tr></thead>
+  <h2>Storage</h2>
+  <div class="cap-bar-wrap"><div class="cap-bar" id="cap-bar" style="width:0%"></div></div>
+  <div class="cap-text"><span id="cap-used">--</span><span id="cap-days">-- days remaining</span></div>
+</div>
+
+<div class="card">
+  <h2>Log Files</h2>
+  <table>
+    <thead><tr><th>Date</th><th>Size</th><th></th></tr></thead>
     <tbody id="file-list"></tbody>
   </table>
 </div>
@@ -204,16 +223,19 @@ const chart = new Chart(ctx, {
   data: {
     labels: [],
     datasets: [
-      {label: 'Temp (°C)', data: [], borderColor: '#e94560', tension: 0.3, yAxisID:'y'},
-      {label: 'Humidity (%)', data: [], borderColor: '#0f3460', tension: 0.3, yAxisID:'y2'}
+      {label:'Temp (°C)', data:[], borderColor:'#1d1d1f', backgroundColor:'rgba(29,29,31,.06)',
+       fill:true, tension:.4, pointRadius:2, borderWidth:2, yAxisID:'y'},
+      {label:'Humidity (%)', data:[], borderColor:'#6e6e73', backgroundColor:'rgba(110,110,115,.06)',
+       fill:true, tension:.4, pointRadius:2, borderWidth:2, yAxisID:'y2'}
     ]
   },
-  options: {
-    responsive: true,
-    animation: false,
-    scales: {
-      y:  {position:'left',  title:{display:true,text:'Temp (°C)'}},
-      y2: {position:'right', title:{display:true,text:'Humidity (%)'}, grid:{drawOnChartArea:false}}
+  options:{
+    responsive:true, animation:false,
+    plugins:{legend:{labels:{font:{size:12},boxWidth:12}}},
+    scales:{
+      x:{ticks:{font:{size:11}},grid:{color:'#f2f2f7'}},
+      y:{position:'left', title:{display:true,text:'°C',font:{size:11}}, grid:{color:'#f2f2f7'}, ticks:{font:{size:11}}},
+      y2:{position:'right', title:{display:true,text:'%',font:{size:11}}, grid:{drawOnChartArea:false}, ticks:{font:{size:11}}}
     }
   }
 });
@@ -234,7 +256,7 @@ function fetchOnce() {
       document.getElementById('val-temp').textContent = d.temperature.toFixed(1);
       document.getElementById('val-humi').textContent = d.humidity.toFixed(1);
       document.getElementById('val-time').textContent = d.datetime;
-      if (chart.data.labels.length >= MAX_POINTS) {
+      if(chart.data.labels.length >= MAX_POINTS){
         chart.data.labels.shift();
         chart.data.datasets[0].data.shift();
         chart.data.datasets[1].data.shift();
@@ -250,15 +272,21 @@ function loadFiles() {
   fetch('/listFiles')
     .then(r=>r.json())
     .then(d=>{
-      document.getElementById('capacity').innerHTML =
-        'SPIFFS: <b>'+fmt(d.used)+'</b> used / <b>'+fmt(d.total)+'</b> total &nbsp;|&nbsp; Est. <b>'+d.daysRemaining+'</b> days remaining';
+      const pct = d.total > 0 ? (d.used/d.total*100).toFixed(1) : 0;
+      document.getElementById('cap-bar').style.width = pct+'%';
+      document.getElementById('cap-used').textContent = fmt(d.used)+' / '+fmt(d.total)+' ('+pct+'%)';
+      document.getElementById('cap-days').textContent = 'Est. '+d.daysRemaining+' days remaining';
       const tbody = document.getElementById('file-list');
       tbody.innerHTML = '';
       d.files.forEach(f=>{
         const tr = document.createElement('tr');
-        tr.innerHTML = '<td>'+f.date+'</td><td>'+fmt(f.size)+'</td>' +
-          '<td><button class="dl" onclick="dlFile(\''+f.date+'\')">Download</button>' +
-          '<button class="rm" onclick="rmFile(\''+f.date+'\')">Delete</button></td>';
+        tr.innerHTML =
+          '<td>'+f.date+'</td>'+
+          '<td><span class="badge">'+fmt(f.size)+'</span></td>'+
+          '<td>'+
+            '<button class="btn" onclick="dlFile(\''+f.date+'\')">&#8615; Download</button> '+
+            '<button class="btn danger" onclick="rmFile(\''+f.date+'\')">Delete</button>'+
+          '</td>';
         tbody.appendChild(tr);
       });
     }).catch(()=>{});
@@ -270,14 +298,11 @@ function fmt(b){
   return (b/1048576).toFixed(2)+' MB';
 }
 
-function dlFile(date) {
-  window.location.href = '/getDate?='+date;
-}
+function dlFile(date){window.location.href='/getDate?='+date;}
 
-function rmFile(date) {
+function rmFile(date){
   if(!confirm('Delete log for '+date+'?')) return;
-  fetch('/deleteFile?date='+date, {method:'DELETE'})
-    .then(()=>loadFiles());
+  fetch('/deleteFile?date='+date).then(()=>loadFiles());
 }
 
 fetchOnce();
@@ -308,6 +333,16 @@ void setupNTP() {
 }
 
 void setupWebServer() {
+    // Add CORS headers to every response
+    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
+    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET");
+    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    // ---- Favicon (prevents 500 on browser requests) ----
+    server.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(204); // No Content
+    });
+
     // ---- Index page ----
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "text/html", INDEX_HTML);
@@ -372,7 +407,7 @@ void setupWebServer() {
     });
 
     // ---- /deleteFile?date=yyyymmdd ----
-    server.on("/deleteFile", HTTP_DELETE, [](AsyncWebServerRequest* req) {
+    server.on("/deleteFile", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!req->hasParam("date")) { req->send(400, "text/plain", "Missing date"); return; }
         String date = req->getParam("date")->value();
         String path = csvPath(date);
@@ -453,6 +488,9 @@ void setup() {
 
     // NTP
     setupNTP();
+
+    // Give lwIP time to fully release WiFiManager's port 80 before binding ours
+    delay(500);
 
     // Web server
     setupWebServer();
