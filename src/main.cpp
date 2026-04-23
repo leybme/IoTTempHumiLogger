@@ -1,5 +1,5 @@
 // IoT Temperature & Humidity Logger
-// ESP32-S3 + SHT45 + SPIFFS + WiFiManager + AsyncWebServer + NTP
+// ESP32-S3 + SHT45/SHT30 + SPIFFS + WiFiManager + AsyncWebServer + NTP
 // Features:
 //   - WiFi Captive Portal (WiFiManager)
 //   - Boot button hold 10s -> reset WiFi credentials & restart captive
@@ -9,10 +9,12 @@
 //   - List / download / delete CSV logs, show sizes & SPIFFS capacity
 //   - REST API: /getOnce  /getDate?=today|yyyymmdd
 //   - Capacity estimation endpoint
+//   - Auto-detects SHT45 or SHT30
 
 #include <Arduino.h>
 #include <Wire.h>
 #include "Adafruit_SHT4x.h"
+#include "Adafruit_SHT31.h"
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <SPIFFS.h>
@@ -25,6 +27,12 @@
 #define SDA_PIN       9
 #define SCL_PIN       8
 #define BOOT_BTN_PIN  0   // GPIO0 = BOOT button on most ESP32-S3 devkits
+#define LED_PIN       48  // Built-in LED on ESP32-S3
+
+// ---- LED blink intervals ----
+#define LED_NORMAL_MS   1000UL  // normal: 1 s
+#define LED_FAST_MS     100UL   // WiFi reset pending: 100 ms
+#define LED_SLOW_MS     2000UL  // captive portal: 2 s
 
 // ---- NTP ----
 #define NTP_SERVER    "pool.ntp.org"
@@ -37,7 +45,11 @@
 
 // ---- Globals ----
 Adafruit_SHT4x sht4;
+Adafruit_SHT31 sht30;
 AsyncWebServer server(80);
+
+enum SensorType { SENSOR_NONE, SENSOR_SHT4X, SENSOR_SHT30 };
+SensorType activeSensor = SENSOR_NONE;
 
 bool sensorOK      = false;
 bool ntpSynced     = false;
@@ -45,6 +57,21 @@ bool useGMT7       = true;   // default GMT+7; toggle via web
 unsigned long lastLogMs  = 0;
 unsigned long bootBtnMs  = 0;
 bool bootBtnHeld   = false;
+char deviceId[12]  = "";  // Log_XXXXXX from MAC
+
+// ---- LED state ----
+unsigned long lastLedMs   = 0;
+bool ledState             = false;
+unsigned long ledInterval = LED_NORMAL_MS;
+
+void ledTick() {
+    unsigned long now = millis();
+    if (now - lastLedMs >= ledInterval) {
+        lastLedMs = now;
+        ledState = !ledState;
+        digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+    }
+}
 
 // Latest reading (updated every loop iteration if sensor OK)
 float latestTemp     = 0;
@@ -101,10 +128,18 @@ void appendRecord(float temp, float humi, const String& utcDt) {
 // Read sensor, update globals
 bool readSensor() {
     if (!sensorOK) return false;
-    sensors_event_t hEvent, tEvent;
-    sht4.getEvent(&hEvent, &tEvent);
-    latestTemp     = tEvent.temperature;
-    latestHumidity = hEvent.relative_humidity;
+    if (activeSensor == SENSOR_SHT4X) {
+        sensors_event_t hEvent, tEvent;
+        sht4.getEvent(&hEvent, &tEvent);
+        latestTemp     = tEvent.temperature;
+        latestHumidity = hEvent.relative_humidity;
+    } else if (activeSensor == SENSOR_SHT30) {
+        latestTemp     = sht30.readTemperature();
+        latestHumidity = sht30.readHumidity();
+        if (isnan(latestTemp) || isnan(latestHumidity)) return false;
+    } else {
+        return false;
+    }
     if (ntpSynced) {
         latestUtcStr  = formatDateTime(time(nullptr));  // always UTC for logging
         latestTimeStr = formatDateTime(nowLocal());      // display tz for UI
@@ -174,10 +209,20 @@ static const char INDEX_HTML[] PROGMEM = R"rawhtml(
   .cap-bar{height:6px;border-radius:6px;background:#1d1d1f;transition:width .4s;}
   .cap-text{font-size:.78rem;color:#6e6e73;display:flex;justify-content:space-between;}
   .badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:.72rem;font-weight:600;background:#f2f2f7;color:#1d1d1f;margin-left:6px;}
+  /* Modal */
+  .modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:100;align-items:center;justify-content:center;}
+  .modal-bg.open{display:flex;}
+  .modal{background:#fff;border-radius:16px;padding:24px;width:min(96vw,720px);box-shadow:0 8px 32px rgba(0,0,0,.18);position:relative;}
+  .modal h2{font-size:.95rem;font-weight:600;margin-bottom:16px;color:#1d1d1f;}
+  .modal-close{position:absolute;top:14px;right:16px;font-size:1.3rem;background:none;border:none;cursor:pointer;color:#6e6e73;line-height:1;}
+  #modal-chart-wrap canvas{max-height:280px;}
 </style>
 </head>
 <body>
-<h1>IoT Temp &amp; Humidity Logger</h1>
+<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:20px;">
+  <h1 style="margin:0;">IoT Temp &amp; Humidity Logger</h1>
+  <span id="device-id" style="font-size:.75rem;color:#6e6e73;font-weight:500;"></span>
+</div>
 
 <div class="grid">
   <div class="tile">
@@ -195,55 +240,38 @@ static const char INDEX_HTML[] PROGMEM = R"rawhtml(
 </div>
 
 <div class="card">
-  <div class="tz-group">
-    <button class="tz-btn" id="btn-utc" onclick="setTZ('UTC')">UTC</button>
-    <button class="tz-btn active" id="btn-gmt7" onclick="setTZ('GMT7')">GMT+7</button>
-  </div>
-  <canvas id="chart"></canvas>
-</div>
-
-<div class="card">
   <h2>Storage</h2>
   <div class="cap-bar-wrap"><div class="cap-bar" id="cap-bar" style="width:0%"></div></div>
   <div class="cap-text"><span id="cap-used">--</span><span id="cap-days">-- days remaining</span></div>
 </div>
 
 <div class="card">
-  <h2>Log Files</h2>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+    <h2 style="margin:0;">Log Files</h2>
+    <div class="tz-group" style="margin:0;">
+      <button class="tz-btn" id="btn-utc" onclick="setTZ('UTC')">UTC</button>
+      <button class="tz-btn active" id="btn-gmt7" onclick="setTZ('GMT7')">GMT+7</button>
+    </div>
+  </div>
   <table>
     <thead><tr><th>Date</th><th>Size</th><th></th></tr></thead>
     <tbody id="file-list"></tbody>
   </table>
 </div>
 
+<!-- Per-day plot modal -->
+<div class="modal-bg" id="modal-bg" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal()">&#10005;</button>
+    <h2 id="modal-title">Plot</h2>
+    <div id="modal-chart-wrap"><canvas id="day-chart"></canvas></div>
+  </div>
+</div>
+
 <script>
-const ctx = document.getElementById('chart').getContext('2d');
-const chart = new Chart(ctx, {
-  type: 'line',
-  data: {
-    labels: [],
-    datasets: [
-      {label:'Temp (°C)', data:[], borderColor:'#1d1d1f', backgroundColor:'rgba(29,29,31,.06)',
-       fill:true, tension:.4, pointRadius:2, borderWidth:2, yAxisID:'y'},
-      {label:'Humidity (%)', data:[], borderColor:'#6e6e73', backgroundColor:'rgba(110,110,115,.06)',
-       fill:true, tension:.4, pointRadius:2, borderWidth:2, yAxisID:'y2'}
-    ]
-  },
-  options:{
-    responsive:true, animation:false,
-    plugins:{legend:{labels:{font:{size:12},boxWidth:12}}},
-    scales:{
-      x:{ticks:{font:{size:11}},grid:{color:'#f2f2f7'}},
-      y:{position:'left', title:{display:true,text:'°C',font:{size:11}}, grid:{color:'#f2f2f7'}, ticks:{font:{size:11}}},
-      y2:{position:'right', title:{display:true,text:'%',font:{size:11}}, grid:{drawOnChartArea:false}, ticks:{font:{size:11}}}
-    }
-  }
-});
-
-const MAX_POINTS = 60;
-
 function setTZ(tz) {
   fetch('/setTZ?tz='+tz).then(()=>{
+    useGMT7 = (tz === 'GMT7');
     document.getElementById('btn-utc').classList.toggle('active', tz==='UTC');
     document.getElementById('btn-gmt7').classList.toggle('active', tz==='GMT7');
   });
@@ -256,15 +284,10 @@ function fetchOnce() {
       document.getElementById('val-temp').textContent = d.temperature.toFixed(1);
       document.getElementById('val-humi').textContent = d.humidity.toFixed(1);
       document.getElementById('val-time').textContent = d.datetime;
-      if(chart.data.labels.length >= MAX_POINTS){
-        chart.data.labels.shift();
-        chart.data.datasets[0].data.shift();
-        chart.data.datasets[1].data.shift();
+      if(d.device_id) {
+        const el = document.getElementById('device-id');
+        el.textContent = d.device_id + (d.sensor ? '  ·  ' + d.sensor : '');
       }
-      chart.data.labels.push(d.datetime.substr(11,5));
-      chart.data.datasets[0].data.push(d.temperature);
-      chart.data.datasets[1].data.push(d.humidity);
-      chart.update();
     }).catch(()=>{});
 }
 
@@ -284,7 +307,8 @@ function loadFiles() {
           '<td>'+f.date+'</td>'+
           '<td><span class="badge">'+fmt(f.size)+'</span></td>'+
           '<td>'+
-            '<button class="btn" onclick="dlFile(\''+f.date+'\')">&#8615; Download</button> '+
+            '<button class="btn" onclick="openPlot(\''+f.date+'\')">&thinsp;&#9654;&thinsp; Plot</button> '+
+            '<button class="btn" onclick="dlFile(\''+f.date+'\')" style="margin-left:4px;">&#8615; Download</button> '+
             '<button class="btn danger" onclick="rmFile(\''+f.date+'\')">Delete</button>'+
           '</td>';
         tbody.appendChild(tr);
@@ -305,6 +329,64 @@ function rmFile(date){
   fetch('/deleteFile?date='+date).then(()=>loadFiles());
 }
 
+// ---- Per-day plot modal ----
+let dayChartInst = null;
+
+function openPlot(date) {
+  document.getElementById('modal-title').textContent = 'Plot  –  ' + date;
+  document.getElementById('modal-bg').classList.add('open');
+  // Fetch CSV as text, parse manually
+  fetch('/getDate?='+date)
+    .then(r=>r.text())
+    .then(csv=>{
+      const lines = csv.trim().split('\n');
+      const labels=[], temps=[], humis=[];
+      const off = useGMT7 ? 7*3600000 : 0;
+      for(let i=1;i<lines.length;i++){
+        const c = lines[i].split(',');
+        if(c.length<3) continue;
+        const s = c[0].trim(); // YYYY-MM-DD HH:MM:SS
+        const utcMs = Date.UTC(
+          parseInt(s.substr(0,4)), parseInt(s.substr(5,2))-1, parseInt(s.substr(8,2)),
+          parseInt(s.substr(11,2)), parseInt(s.substr(14,2)), parseInt(s.substr(17,2))
+        );
+        const d2 = new Date(utcMs + off);
+        labels.push(String(d2.getUTCHours()).padStart(2,'0')+':'+String(d2.getUTCMinutes()).padStart(2,'0'));
+        temps.push(parseFloat(c[1]));
+        humis.push(parseFloat(c[2]));
+      }
+      if(dayChartInst) dayChartInst.destroy();
+      const ctx2 = document.getElementById('day-chart').getContext('2d');
+      dayChartInst = new Chart(ctx2, {
+        type:'line',
+        data:{
+          labels,
+          datasets:[
+            {label:'Temp (°C)', data:temps, borderColor:'#e3342f', backgroundColor:'rgba(227,52,47,.08)',
+             fill:true, tension:.4, pointRadius:1, borderWidth:2, yAxisID:'y'},
+            {label:'Humidity (%)', data:humis, borderColor:'#3b82f6', backgroundColor:'rgba(59,130,246,.08)',
+             fill:true, tension:.4, pointRadius:1, borderWidth:2, yAxisID:'y2'}
+          ]
+        },
+        options:{
+          responsive:true, animation:false,
+          plugins:{legend:{labels:{font:{size:12},boxWidth:12}}},
+          scales:{
+            x:{ticks:{font:{size:10}, maxTicksLimit:24}, grid:{color:'#f2f2f7'}},
+            y:{position:'left', title:{display:true,text:'°C',font:{size:11}}, grid:{color:'#f2f2f7'}, ticks:{font:{size:11}}},
+            y2:{position:'right', title:{display:true,text:'%',font:{size:11}}, grid:{drawOnChartArea:false}, ticks:{font:{size:11}}}
+          }
+        }
+      });
+    }).catch(()=>alert('Failed to load data for '+date));
+}
+
+let useGMT7 = true; // mirrors server default (GMT+7); updated by setTZ()
+
+function closeModal(){
+  document.getElementById('modal-bg').classList.remove('open');
+}
+
 fetchOnce();
 loadFiles();
 setInterval(fetchOnce, 60000);
@@ -321,14 +403,15 @@ void setupNTP() {
     Serial.print("Waiting for NTP...");
     struct tm ti;
     int tries = 0;
-    while (!getLocalTime(&ti, 1000) && tries++ < 20) {
+    while (!getLocalTime(&ti, 500) && tries++ < 30) {
         Serial.print(".");
+        yield();  // feed watchdog during NTP wait
     }
-    if (tries < 20) {
+    if (tries < 30) {
         ntpSynced = true;
         Serial.println(" synced.");
     } else {
-        Serial.println(" FAILED.");
+        Serial.println(" FAILED (will retry later).");
     }
 }
 
@@ -357,6 +440,9 @@ void setupWebServer() {
         doc["datetime"]       = latestTimeStr;   // display timezone
         doc["datetime_utc"]   = latestUtcStr;    // always UTC
         doc["timezone"]       = useGMT7 ? "GMT+7" : "UTC";
+        doc["device_id"]      = deviceId;
+        doc["sensor"]         = (activeSensor == SENSOR_SHT4X) ? "SHT45" :
+                                (activeSensor == SENSOR_SHT30) ? "SHT30" : "none";
         String out;
         serializeJson(doc, out);
         req->send(200, "application/json", out);
@@ -450,34 +536,50 @@ void setup() {
     Serial.println("Booting IoT Logger...");
 
     pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
 
-    // Mount SPIFFS
+    // Slow blink during captive portal / boot
+    ledInterval = LED_SLOW_MS;
     if (!SPIFFS.begin(true)) {
         Serial.println("SPIFFS mount failed!");
     } else {
         Serial.printf("SPIFFS: %u / %u bytes used\n", spiffsUsed(), spiffsTotal());
     }
 
-    // Init sensor
+    // Init sensor — try SHT45 first, fall back to SHT30
     Wire.begin(SDA_PIN, SCL_PIN);
-    sensorOK = sht4.begin();
-    if (sensorOK) {
+    Wire.setTimeOut(200);  // prevent I2C bus stall from hanging firmware
+    if (sht4.begin()) {
         sht4.setPrecision(SHT4X_HIGH_PRECISION);
         sht4.setHeater(SHT4X_NO_HEATER);
-        Serial.println("SHT45 ready");
+        activeSensor = SENSOR_SHT4X;
+        sensorOK = true;
+        Serial.println("Sensor: SHT45 ready");
+    } else if (sht30.begin()) {
+        activeSensor = SENSOR_SHT30;
+        sensorOK = true;
+        Serial.println("Sensor: SHT30 ready");
     } else {
-        Serial.println("SHT45 not found!");
+        activeSensor = SENSOR_NONE;
+        sensorOK = false;
+        Serial.println("No sensor found! (tried SHT45 and SHT30)");
     }
 
-    // Build AP name from last 3 bytes of MAC: Log_AABBCC
+    Wire.clearWriteError();  // clear any I2C error state after probing
+
+    // Build device ID and AP name from last 3 bytes of MAC: Log_AABBCC
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(deviceId, sizeof(deviceId), "Log_%02X%02X%02X", mac[3], mac[4], mac[5]);
     char apName[16];
-    snprintf(apName, sizeof(apName), "Log_%02X%02X%02X", mac[3], mac[4], mac[5]);
+    strncpy(apName, deviceId, sizeof(apName));
+    Serial.printf("Device ID: %s\n", deviceId);
 
-    // WiFiManager captive portal
+    // WiFiManager captive portal (slow blink while waiting)
     WiFiManager wm;
     wm.setConfigPortalTimeout(180); // 3 min timeout
+    // Use save callback to detect when credentials are saved (portal active = slow blink)
     bool connected = wm.autoConnect(apName);
     if (!connected) {
         Serial.println("WiFi connect failed, restarting...");
@@ -485,6 +587,9 @@ void setup() {
         ESP.restart();
     }
     Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
+
+    // Connected — switch to normal blink
+    ledInterval = LED_NORMAL_MS;
 
     // NTP
     setupNTP();
@@ -497,28 +602,52 @@ void setup() {
 }
 
 void loop() {
+    ledTick();  // non-blocking LED blink
+
     // ---- Boot button: hold 10s -> reset WiFi ----
     if (digitalRead(BOOT_BTN_PIN) == LOW) {
         if (!bootBtnHeld) {
-            bootBtnMs  = millis();
+            bootBtnMs   = millis();
             bootBtnHeld = true;
-        } else if (millis() - bootBtnMs >= 10000UL) {
+        }
+        // Blink fast while button is held
+        ledInterval = LED_FAST_MS;
+        if (millis() - bootBtnMs >= 10000UL) {
             resetWiFiAndReboot();
         }
     } else {
+        if (bootBtnHeld) ledInterval = LED_NORMAL_MS;  // released before 10s
         bootBtnHeld = false;
     }
 
-    // ---- Sensor retry if not ready ----
+    // ---- Sensor retry if not ready (non-blocking: use millis instead of delay) ----
     if (!sensorOK) {
-        Wire.begin(SDA_PIN, SCL_PIN);
-        sensorOK = sht4.begin();
-        if (sensorOK) {
-            sht4.setPrecision(SHT4X_HIGH_PRECISION);
-            sht4.setHeater(SHT4X_NO_HEATER);
+        static unsigned long sensorRetryMs = 0;
+        if (millis() - sensorRetryMs >= 2000UL) {
+            sensorRetryMs = millis();
+            Wire.begin(SDA_PIN, SCL_PIN);
+            Wire.setTimeOut(200);
+            if (sht4.begin()) {
+                sht4.setPrecision(SHT4X_HIGH_PRECISION);
+                sht4.setHeater(SHT4X_NO_HEATER);
+                activeSensor = SENSOR_SHT4X;
+                sensorOK = true;
+            } else if (sht30.begin()) {
+                activeSensor = SENSOR_SHT30;
+                sensorOK = true;
+            }
         }
-        delay(2000);
+        delay(10);
         return;
+    }
+
+    // ---- NTP retry if not synced ----
+    if (!ntpSynced) {
+        struct tm ti;
+        if (getLocalTime(&ti, 100)) {
+            ntpSynced = true;
+            Serial.println("NTP synced (retry).");
+        }
     }
 
     // ---- Log every minute ----
